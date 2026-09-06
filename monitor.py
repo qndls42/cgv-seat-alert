@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 import time
@@ -171,6 +172,13 @@ def apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
     poll = (os.environ.get("POLL_INTERVAL_SEC") or "").strip()
     if poll.isdigit():
         cfg["poll_interval_sec"] = int(poll)
+    for env_key, cfg_key in (
+        ("POLL_INTERVAL_MIN_SEC", "poll_interval_min_sec"),
+        ("POLL_INTERVAL_MAX_SEC", "poll_interval_max_sec"),
+    ):
+        val = (os.environ.get(env_key) or "").strip()
+        if val.isdigit():
+            cfg[cfg_key] = int(val)
 
     increase = (os.environ.get("ALERT_ON_INCREASE_ONLY") or "").strip().lower()
     if increase in ("1", "true", "yes"):
@@ -317,6 +325,33 @@ def should_alert(
     return False, "skip"
 
 
+MIN_POLL_SEC = 15
+
+
+def poll_range(cfg: dict[str, Any]) -> tuple[int, int]:
+    """폴링 간격 (min, max) 초. min==max 이면 고정 간격, 아니면 매회 그 사이 랜덤."""
+    lo = cfg.get("poll_interval_min_sec")
+    hi = cfg.get("poll_interval_max_sec")
+    if lo is not None and hi is not None:
+        lo_i, hi_i = int(lo), int(hi)
+    else:
+        fixed = int(cfg.get("poll_interval_sec", 45))
+        lo_i, hi_i = fixed, fixed
+    lo_i = max(MIN_POLL_SEC, lo_i)
+    hi_i = max(lo_i, hi_i)
+    return lo_i, hi_i
+
+
+def next_sleep(cfg: dict[str, Any]) -> int:
+    lo, hi = poll_range(cfg)
+    return lo if lo == hi else random.randint(lo, hi)
+
+
+def describe_interval(cfg: dict[str, Any]) -> str:
+    lo, hi = poll_range(cfg)
+    return f"{lo}s" if lo == hi else f"{lo}~{hi}s 랜덤"
+
+
 def fail_alert_threshold(cfg: dict[str, Any]) -> int:
     return max(1, int(cfg.get("fail_alert_threshold", 3)))
 
@@ -410,7 +445,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="조회·로그만 하고 푸시는 보내지 않음",
     )
-    p.add_argument("--interval", type=int, default=None, help="폴링 초 (config 덮어쓰기)")
+    p.add_argument("--interval", type=int, default=None, help="고정 폴링 초 (config 덮어쓰기)")
+    p.add_argument(
+        "--interval-min",
+        type=int,
+        default=None,
+        help="랜덤 폴링 최소 초 (--interval-max 와 함께; 매회 그 사이에서 랜덤)",
+    )
+    p.add_argument("--interval-max", type=int, default=None, help="랜덤 폴링 최대 초")
     p.add_argument(
         "--any-seat",
         action="store_true",
@@ -437,6 +479,14 @@ def main() -> int:
     cfg = apply_env_overrides(load_json(resolve_config_path(args.config)))
     if args.interval:
         cfg["poll_interval_sec"] = args.interval
+        cfg.pop("poll_interval_min_sec", None)
+        cfg.pop("poll_interval_max_sec", None)
+    if (args.interval_min is None) != (args.interval_max is None):
+        print(f"[{now_kst()}] 설정 오류: --interval-min 과 --interval-max 는 함께 지정하세요", file=sys.stderr)
+        return 2
+    if args.interval_min is not None:
+        cfg["poll_interval_min_sec"] = args.interval_min
+        cfg["poll_interval_max_sec"] = args.interval_max
     if args.any_seat:
         cfg["alert_on_increase_only"] = False
     if args.dry_run:
@@ -476,7 +526,7 @@ def main() -> int:
     theater = cfg.get("theater_name") or cfg.get("theater_keyword")
     print(
         f"[{now_kst()}] 감시 시작: {label} | {theater} | "
-        f"{cfg['play_date']} {cfg['start_time']} | 간격 {cfg['poll_interval_sec']}s"
+        f"{cfg['play_date']} {cfg['start_time']} | 간격 {describe_interval(cfg)}"
     )
     topic = cfg.get("ntfy_topic") or "(미설정)"
     print(f"[{now_kst()}] ntfy 토픽: {topic} @ {cfg.get('ntfy_server')}")
@@ -497,9 +547,8 @@ def main() -> int:
     if args.once:
         return 0
 
-    interval = max(15, int(cfg.get("poll_interval_sec", 45)))
     while True:
-        time.sleep(interval)
+        time.sleep(next_sleep(cfg))
         try:
             state = once(cfg, state)
             save_json(STATE_FILE, state)

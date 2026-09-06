@@ -1,7 +1,8 @@
 name: CGV seat alert
 
 # 동작 방식 (체인 모드)
-#  - 한 실행이 최대 RUN_MINUTES(기본 330분) 동안 POLL_INTERVAL_SEC 간격으로 잔여석을 폴링한 뒤
+#  - 한 실행이 최대 RUN_MINUTES(기본 330분) 동안 1~5분 사이 랜덤 간격(POLL_INTERVAL_MIN/MAX_SEC)으로
+#    잔여석을 폴링한 뒤
 #    스스로 다음 실행을 workflow_dispatch 로 예약한다 → 스케줄 지연/생략과 무관하게 계속 돈다.
 #  - 상영 시작 시각(PLAY_DATE + START_TIME, KST)이 지나면 체인을 멈춘다.
 #  - 멈추고 싶으면 Actions 탭에서 워크플로를 Disable 하면 된다 (다음 dispatch 가 실패하며 종료).
@@ -119,14 +120,21 @@ jobs:
           MOVIE_NAME: ${{ vars.MOVIE_NAME }}
           PLAY_DATE: ${{ vars.PLAY_DATE }}
           START_TIME: ${{ vars.START_TIME }}
+          # 폴링 간격: 기본 60~300초 사이 매회 랜덤. POLL_INTERVAL_SEC 를 주면 그 값으로 고정.
           POLL_INTERVAL_SEC: ${{ vars.POLL_INTERVAL_SEC }}
+          POLL_INTERVAL_MIN_SEC: ${{ vars.POLL_INTERVAL_MIN_SEC }}
+          POLL_INTERVAL_MAX_SEC: ${{ vars.POLL_INTERVAL_MAX_SEC }}
           ALERT_SOURCE: Actions
           RUN_MINUTES: ${{ steps.window.outputs.minutes }}
         run: |
-          poll="${POLL_INTERVAL_SEC:-300}"
+          if [ -n "$POLL_INTERVAL_SEC" ]; then
+            poll_args=(--interval "$POLL_INTERVAL_SEC")
+          else
+            poll_args=(--interval-min "${POLL_INTERVAL_MIN_SEC:-60}" --interval-max "${POLL_INTERVAL_MAX_SEC:-300}")
+          fi
           started=$(date +%s)
           set +e
-          timeout "${RUN_MINUTES}m" python -u monitor.py --interval "$poll"
+          timeout "${RUN_MINUTES}m" python -u monitor.py "${poll_args[@]}"
           rc=$?
           set -e
           if [ "$rc" -eq 124 ]; then
