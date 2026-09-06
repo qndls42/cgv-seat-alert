@@ -105,28 +105,40 @@ python -u monitor.py --status-push      # 감시 시작 + 현재 잔여 푸시
 | 경로 | 간격 | 용도 |
 |------|------|------|
 | 로컬 `monitor.py` | `poll_interval_sec` (기본 45초) | 집중 감시 |
-| GitHub Actions (체인 모드) | 60~300초 랜덤 (`POLL_INTERVAL_MIN/MAX_SEC`) | PC 꺼둔 동안 상시 감시 |
+| GitHub Actions + 외부 크론 | 5분 | PC 꺼둔 동안 상시 감시 |
 
 ### GitHub Actions 설정
 
 1. **Secrets:** `NTFY_TOPIC` (필수), `NTFY_SERVER` / Telegram (선택)
-2. **Variables:** `THEATER_CODE`, `THEATER_KEYWORD`, `THEATER_NAME`, `MOVIE_CODE`, `MOVIE_NAME`, `PLAY_DATE`, `START_TIME` (선택: `POLL_INTERVAL_MIN_SEC`/`POLL_INTERVAL_MAX_SEC` 기본 60/300, 또는 고정 `POLL_INTERVAL_SEC`)
-3. Actions → `CGV seat chain` → Enable → **Run workflow**로 시작
+2. **Variables:** `THEATER_CODE`, `THEATER_KEYWORD`, `THEATER_NAME`, `MOVIE_CODE`, `MOVIE_NAME`, `PLAY_DATE`, `START_TIME` (선택: `JITTER_MAX_SEC`, 조회 전 0~N초 랜덤 대기)
+3. Actions → `CGV seat alert` → Enable → **Run workflow**로 1회 테스트
 
-fork 한 저장소는 Actions 탭에서 워크플로 사용을 한 번 동의한 뒤 `CGV seat chain`을 **Enable workflow** 해야 합니다. 예전 cron 방식의 `CGV seat alert` 워크플로가 남아 있다면 그쪽은 **Disable** 하세요.
+fork 한 저장소는 Actions 탭에서 워크플로 사용을 한 번 동의한 뒤 `CGV seat alert`를 **Enable workflow** 해야 합니다.
 
-#### 체인 모드로 도는 이유
+#### 5분마다 실행: 외부 크론 서비스로 트리거
 
-GitHub 무료 플랜의 `schedule`(cron)은 부하에 따라 수십 분~몇 시간씩 지연되거나 아예 생략됩니다. 5분 cron 을 걸어도 실제로는 하루 몇 번만 도는 일이 흔합니다. 그래서 이 워크플로는 cron 대신 **스스로 다음 실행을 예약**합니다.
+GitHub 무료 플랜의 `schedule`(cron)은 부하에 따라 수십 분~몇 시간씩 지연되거나 생략되어 5분 간격을 지키지 못합니다. 그래서 이 워크플로는 `workflow_dispatch`만 열어 두고, **외부 크론 서비스**(예: [cron-job.org](https://cron-job.org))가 5분마다 GitHub API를 호출해 실행시킵니다.
 
-- 한 실행이 최대 330분 동안 1~5분 사이 매회 랜덤 간격으로 `monitor.py`를 돌리고, 끝나면 `workflow_dispatch`로 다음 실행을 예약합니다 (`GITHUB_TOKEN` + `actions: write`).
-- `PLAY_DATE` + `START_TIME`(KST)이 지나면 감시와 체인을 자동 종료합니다. 마지막 실행은 상영 시각까지만 돕니다.
-- **멈추려면** Actions 탭에서 워크플로를 **Disable** 하거나 실행 중인 run 을 **Cancel** 하세요. 취소된 run 은 다음 실행을 예약하지 않으므로 체인이 끊깁니다.
-- **다시 시작하려면** `Run workflow` 를 누르세요. 체인은 `Run workflow` 에서 고른 브랜치의 워크플로 파일로 돕니다.
-- `schedule`(cron) 은 사용하지 않습니다. 스케줄 실행은 체인과 같은 concurrency 그룹에서 경쟁해 서로를 취소시키고, 무료 플랜에서는 어차피 지연·생략되기 때문입니다. 체인이 끊겼는지는 Actions 탭에 진행 중인 run 이 있는지로 확인하세요.
-- `Run workflow` 의 `run_minutes` 입력은 이번 실행의 폴링 시간(분)입니다. 비우면 330, 동작 확인용으로는 2~3분을 넣으세요. 다음 체인 실행부터는 다시 330분입니다.
+1. GitHub → Settings → Developer settings → **Fine-grained personal access token** 발급
+   - Repository access: 이 저장소만
+   - Permissions → Repository permissions → **Actions: Read and write**
+   - 만료일은 감시가 끝나는 날 직후로 짧게
+2. 크론 서비스에 아래 요청을 5분 간격으로 등록
 
-이전 조회 결과(`state.json`)는 Actions 캐시로 실행 간에 이어지므로 체인이 바뀌어도 "증가" 판정이 유지됩니다.
+   ```
+   POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/cgv-seat-alert.yml/dispatches
+   Authorization: Bearer <PAT>
+   Accept: application/vnd.github+json
+   X-GitHub-Api-Version: 2022-11-28
+   Content-Type: application/json
+
+   {"ref":"main"}
+   ```
+
+   성공 응답은 `204 No Content` 입니다. `ref` 는 실행할 브랜치입니다.
+3. 한 실행은 잔여석을 1회 조회하고 끝납니다. 이전 조회 결과(`state.json`)는 Actions 캐시로 이어지므로 "증가" 판정이 유지됩니다.
+4. 조회 시각을 흩뿌리고 싶으면 Variables `JITTER_MAX_SEC` (예: `240`)을 넣으세요. 각 실행이 조회 전 0~N초 랜덤 대기합니다.
+5. 멈추려면 크론 서비스의 작업을 끄거나 PAT 를 폐기하세요.
 
 ## CLI
 
