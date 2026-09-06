@@ -111,9 +111,9 @@ python -u monitor.py --status-push      # 감시 시작 + 현재 잔여 푸시
 
 1. **Secrets:** `NTFY_TOPIC` (필수), `NTFY_SERVER` / Telegram (선택)
 2. **Variables:** `THEATER_CODE`, `THEATER_KEYWORD`, `THEATER_NAME`, `MOVIE_CODE`, `MOVIE_NAME`, `PLAY_DATE`, `START_TIME` (선택: `POLL_INTERVAL_MIN_SEC`/`POLL_INTERVAL_MAX_SEC` 기본 60/300, 또는 고정 `POLL_INTERVAL_SEC`)
-3. Actions → `CGV seat alert` → Enable → **Run workflow**로 시작
+3. Actions → `CGV seat chain` → Enable → **Run workflow**로 시작
 
-fork 한 저장소는 Actions 탭에서 워크플로 사용을 한 번 동의한 뒤 `CGV seat alert`를 **Enable workflow** 해야 합니다.
+fork 한 저장소는 Actions 탭에서 워크플로 사용을 한 번 동의한 뒤 `CGV seat chain`을 **Enable workflow** 해야 합니다. 예전 cron 방식의 `CGV seat alert` 워크플로가 남아 있다면 그쪽은 **Disable** 하세요.
 
 #### 체인 모드로 도는 이유
 

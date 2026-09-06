@@ -1,4 +1,4 @@
-name: CGV seat alert
+name: CGV seat chain
 
 # 동작 방식 (체인 모드)
 #  - 한 실행이 최대 RUN_MINUTES(기본 330분) 동안 1~5분 사이 랜덤 간격(POLL_INTERVAL_MIN/MAX_SEC)으로
@@ -162,7 +162,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           REF: ${{ github.ref_name }}
         run: |
-          if gh workflow run cgv-seat-alert.yml --ref "$REF"; then
+          if gh workflow run cgv-seat-chain.yml --ref "$REF"; then
             echo "다음 실행 예약 완료 (ref=$REF)"
           else
             echo "::warning::다음 실행 예약 실패 — 워크플로가 비활성화됐거나 권한 문제. 체인 종료."
