@@ -1,19 +1,35 @@
 name: CGV seat alert
 
+# 동작 방식 (체인 모드)
+#  - 한 실행이 최대 RUN_MINUTES(기본 330분) 동안 POLL_INTERVAL_SEC 간격으로 잔여석을 폴링한 뒤
+#    스스로 다음 실행을 workflow_dispatch 로 예약한다 → 스케줄 지연/생략과 무관하게 계속 돈다.
+#  - 상영 시작 시각(PLAY_DATE + START_TIME, KST)이 지나면 체인을 멈춘다.
+#  - 멈추고 싶으면 Actions 탭에서 워크플로를 Disable 하면 된다 (다음 dispatch 가 실패하며 종료).
+#  - schedule 은 체인이 끊겼을 때(러너 장애 등) 다시 살리는 안전망이다. GitHub 무료 플랜의
+#    스케줄은 자주 지연·생략되므로 5분 cron 을 믿지 말고 체인으로 간격을 보장한다.
+
 on:
   schedule:
-    # UTC. KST = UTC+9 → 매 5분
-    - cron: "*/5 * * * *"
+    # UTC. 체인 재시작용 안전망 (매시 7분). 체인이 살아 있으면 concurrency 에 의해 대기 후 취소된다.
+    - cron: "7 * * * *"
   workflow_dispatch:
+    inputs:
+      run_minutes:
+        description: "이 실행이 폴링할 시간(분). 비우면 330. 테스트 시 2~3 권장"
+        required: false
+        default: ""
 
 concurrency:
   group: cgv-seat-alert
   cancel-in-progress: false
 
+env:
+  DEFAULT_RUN_MINUTES: "330"
+
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 345
     permissions:
       contents: read
       actions: write
@@ -46,7 +62,49 @@ jobs:
           restore-keys: |
             cgv-state-
 
-      - name: Check remaining seats once
+      - name: Compute polling window
+        id: window
+        env:
+          PLAY_DATE: ${{ vars.PLAY_DATE }}
+          START_TIME: ${{ vars.START_TIME }}
+          RUN_MINUTES_INPUT: ${{ inputs.run_minutes }}
+        run: |
+          max="${RUN_MINUTES_INPUT:-$DEFAULT_RUN_MINUTES}"
+          if ! [[ "$max" =~ ^[0-9]+$ ]] || [ "$max" -lt 1 ]; then
+            echo "::warning::run_minutes 값이 이상함('$max') → $DEFAULT_RUN_MINUTES 사용"
+            max="$DEFAULT_RUN_MINUTES"
+          fi
+          minutes="$max"
+          chain="true"
+          if [[ "$PLAY_DATE" =~ ^[0-9]{8}$ ]] && [[ "$START_TIME" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+            hh="${BASH_REMATCH[1]}"; mm="${BASH_REMATCH[2]}"
+            day="${PLAY_DATE:0:4}-${PLAY_DATE:4:2}-${PLAY_DATE:6:2}"
+            # CGV 는 심야 회차를 24:30 처럼 표기 → 다음날로 환산
+            if [ "$hh" -ge 24 ]; then
+              hh=$((hh - 24))
+              day=$(date -u -d "$day +1 day" +%F)
+            fi
+            target=$(TZ=Asia/Seoul date -d "$day $(printf '%02d' "$hh"):$mm" +%s)
+            now=$(date +%s)
+            remain=$(( (target - now) / 60 ))
+            echo "상영 시작(KST) $day $(printf '%02d' "$hh"):$mm 까지 ${remain}분"
+            if [ "$remain" -le 0 ]; then
+              echo "::notice::상영 시작 시각이 지났습니다. 감시와 체인을 종료합니다."
+              minutes="0"; chain="false"
+            elif [ "$remain" -lt "$max" ]; then
+              minutes="$remain"
+              # 이 실행이 상영 시각까지 감시하고 끝나므로 다음 실행은 예약하지 않음
+              chain="false"
+            fi
+          else
+            echo "::warning::PLAY_DATE/START_TIME 변수가 없거나 형식이 달라 종료 시각을 계산하지 못함 → ${max}분 감시"
+          fi
+          echo "minutes=$minutes" >> "$GITHUB_OUTPUT"
+          echo "chain=$chain" >> "$GITHUB_OUTPUT"
+          echo "이번 실행 폴링 시간: ${minutes}분, 다음 실행 예약: $chain"
+
+      - name: Monitor remaining seats
+        if: steps.window.outputs.minutes != '0'
         env:
           # 알림 (Secrets)
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
@@ -61,8 +119,27 @@ jobs:
           MOVIE_NAME: ${{ vars.MOVIE_NAME }}
           PLAY_DATE: ${{ vars.PLAY_DATE }}
           START_TIME: ${{ vars.START_TIME }}
+          POLL_INTERVAL_SEC: ${{ vars.POLL_INTERVAL_SEC }}
           ALERT_SOURCE: Actions
-        run: python monitor.py --once
+          RUN_MINUTES: ${{ steps.window.outputs.minutes }}
+        run: |
+          poll="${POLL_INTERVAL_SEC:-300}"
+          started=$(date +%s)
+          set +e
+          timeout "${RUN_MINUTES}m" python -u monitor.py --interval "$poll"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 124 ]; then
+            echo "폴링 시간(${RUN_MINUTES}분) 종료 — 정상"
+            rc=0
+          fi
+          # 설정 오류 등으로 바로 죽었을 때 체인이 초단위로 재실행되는 것을 막는다
+          elapsed=$(( $(date +%s) - started ))
+          if [ "$elapsed" -lt 300 ]; then
+            echo "실행이 ${elapsed}초 만에 끝남 → 체인 간격 유지를 위해 $((300 - elapsed))초 대기"
+            sleep $((300 - elapsed))
+          fi
+          exit "$rc"
 
       - name: Save seat state
         if: always() && hashFiles('state.json') != ''
@@ -70,3 +147,16 @@ jobs:
         with:
           path: state.json
           key: cgv-state-${{ github.run_id }}
+
+      - name: Dispatch next run (chain)
+        if: ${{ !cancelled() && steps.window.outputs.chain == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+        run: |
+          if gh workflow run cgv-seat-alert.yml --ref "$REF"; then
+            echo "다음 실행 예약 완료 (ref=$REF)"
+          else
+            echo "::warning::다음 실행 예약 실패 — 워크플로가 비활성화됐거나 권한 문제. 체인 종료."
+          fi

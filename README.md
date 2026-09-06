@@ -104,15 +104,27 @@ python -u monitor.py --status-push      # 감시 시작 + 현재 잔여 푸시
 | 경로 | 간격 | 용도 |
 |------|------|------|
 | 로컬 `monitor.py` | `poll_interval_sec` (기본 45초) | 집중 감시 |
-| GitHub Actions | 5분 | PC 꺼둔 동안 백업 |
+| GitHub Actions (체인 모드) | `POLL_INTERVAL_SEC` (기본 300초) | PC 꺼둔 동안 상시 감시 |
 
 ### GitHub Actions 설정
 
 1. **Secrets:** `NTFY_TOPIC` (필수), `NTFY_SERVER` / Telegram (선택)
-2. **Variables:** `THEATER_CODE`, `THEATER_KEYWORD`, `THEATER_NAME`, `MOVIE_CODE`, `MOVIE_NAME`, `PLAY_DATE`, `START_TIME`
-3. Actions → `CGV seat alert` → Enable → **Run workflow**로 테스트
+2. **Variables:** `THEATER_CODE`, `THEATER_KEYWORD`, `THEATER_NAME`, `MOVIE_CODE`, `MOVIE_NAME`, `PLAY_DATE`, `START_TIME` (선택: `POLL_INTERVAL_SEC`, 기본 300)
+3. Actions → `CGV seat alert` → Enable → **Run workflow**로 시작
 
-스케줄은 UTC `*/5`입니다. 무료 플랜에서는 지연될 수 있습니다.
+fork 한 저장소는 Actions 탭에서 워크플로 사용을 한 번 동의한 뒤 `CGV seat alert`를 **Enable workflow** 해야 합니다.
+
+#### 체인 모드로 도는 이유
+
+GitHub 무료 플랜의 `schedule`(cron)은 부하에 따라 수십 분~몇 시간씩 지연되거나 아예 생략됩니다. 5분 cron 을 걸어도 실제로는 하루 몇 번만 도는 일이 흔합니다. 그래서 이 워크플로는 cron 대신 **스스로 다음 실행을 예약**합니다.
+
+- 한 실행이 최대 330분 동안 `POLL_INTERVAL_SEC` 간격으로 `monitor.py`를 돌리고, 끝나면 `workflow_dispatch`로 다음 실행을 예약합니다 (`GITHUB_TOKEN` + `actions: write`).
+- `PLAY_DATE` + `START_TIME`(KST)이 지나면 감시와 체인을 자동 종료합니다. 마지막 실행은 상영 시각까지만 돕니다.
+- **멈추려면** Actions 탭에서 워크플로를 **Disable** 하세요. 다음 예약이 실패하며 체인이 끊깁니다. 실행 중인 run 을 Cancel 해도 체인은 이어지지 않습니다.
+- 매시 7분 cron 은 체인이 끊겼을 때(러너 장애 등) 다시 살리는 안전망입니다. 체인이 살아 있으면 concurrency 에 의해 대기 후 자동 취소되므로 취소된 run 이 보여도 정상입니다. cron 은 기본 브랜치에서만 동작합니다.
+- `Run workflow` 의 `run_minutes` 입력은 이번 실행의 폴링 시간(분)입니다. 비우면 330, 동작 확인용으로는 2~3분을 넣으세요. 다음 체인 실행부터는 다시 330분입니다.
+
+이전 조회 결과(`state.json`)는 Actions 캐시로 실행 간에 이어지므로 체인이 바뀌어도 "증가" 판정이 유지됩니다.
 
 ## CLI
 
