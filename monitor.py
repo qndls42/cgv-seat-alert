@@ -385,6 +385,31 @@ def clear_failures(state: dict[str, Any]) -> None:
     state["last_error"] = None
 
 
+def target_key(cfg: dict[str, Any]) -> str:
+    """감시 대상을 식별하는 키. 바뀌면 이전 잔여석 기준값을 버린다."""
+    return "|".join(
+        str(cfg.get(k) or "").strip()
+        for k in ("theater_code", "movie_code", "movie_name", "play_date", "start_time")
+    )
+
+
+def reset_state_if_target_changed(cfg: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """다른 상영을 감시하던 state.json 이 남아 있으면 기준값을 초기화한다.
+
+    그대로 두면 이전 영화의 잔여석과 비교해 첫 조회에 가짜 '취소표 감지' 알림이 날 수 있다.
+    """
+    key = target_key(cfg)
+    prev_key = state.get("target")
+    if prev_key == key:
+        return state
+    if prev_key is not None or state.get("remaining_seats") is not None:
+        print(
+            f"[{now_kst()}] 감시 대상이 바뀜 ({state.get('movie_name')} {state.get('start_time')} → "
+            f"{cfg.get('movie_name')} {cfg.get('start_time')}) - 기준값 초기화"
+        )
+    return {"target": key, "consecutive_failures": 0, "last_error": None}
+
+
 def once(cfg: dict[str, Any], state: dict[str, Any], *, force_status: bool = False) -> dict[str, Any]:
     show = fetch_target(cfg)
     if show is None:
@@ -425,6 +450,7 @@ def once(cfg: dict[str, Any], state: dict[str, Any], *, force_status: bool = Fal
             "last_error": None,
             "movie_name": show.get("movieName") or cfg["movie_name"],
             "start_time": show.get("startTime") or cfg["start_time"],
+            "target": target_key(cfg),
         }
     )
     return state
@@ -521,6 +547,7 @@ def main() -> int:
             state = load_json(STATE_FILE)
         except json.JSONDecodeError:
             state = {}
+    state = reset_state_if_target_changed(cfg, state)
 
     label = cfg.get("movie_name") or cfg.get("movie_code")
     theater = cfg.get("theater_name") or cfg.get("theater_keyword")
